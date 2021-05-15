@@ -133,10 +133,14 @@ def stratux_to_cot(msg: dict, stale: int = None, # NOQA pylint: disable=too-many
 
     flight = msg.get('Tail', '').strip()
     if flight:
-        callsign = flight
+          callsign = flight
+   #  else: callsign = Reg (computed US registry "N-number")
+   #     *** Just place the "computeed" registry in the Remarks...leave Callsign as ICAO hex or Flight ID
     else:
         callsign = icao_hex
 
+    calc_registry = msg.get('Reg', '').strip()    
+    
     # Figure out appropriate CoT Type:
     emitter_category = msg.get("Emitter_category")
     cot_type = classifier(icao_hex, emitter_category, flight)
@@ -145,40 +149,53 @@ def stratux_to_cot(msg: dict, stale: int = None, # NOQA pylint: disable=too-many
     point.lat = lat
     point.lon = lon
 
-    if msg.get("OnGround"):
+    if msg.get("OnGround"):    # OnGround=true means vehicle is on the ground
         point.hae = "9999999.0"
-        point.ce = 51.56 + int(msg.get("NACp"))
+        point.ce = 51.56 + int(msg.get("NACp"))  # NACp has to be looked up from a table, the value is an index that referes to various ranges of meters...not actually meters.
         point.le = 12.5 + int(msg.get("NACp"))
     else:
         point.ce = 56.57 + int(msg.get("NACp"))
         point.le = 12.5 + int(msg.get("NACp"))
-        alt = int(msg.get("Alt", 0))
-        if alt:
-            point.hae = alt * 0.3048
+        alt = int(msg.get("Alt", 0))     # change to alt_hae = int(msg.get("Last_GnssDiffAlt' + 'GnssDiffFromBaroAlt), 0))   ---- or something like this
+            # TODO:  Pressure altitude, feet  when "AltIsGNSS" is 0 #
+            # this needs to be expanded to calculate GNSS Altitude to use in CoT, 
+            # see "GnssDiffFromBaroAlt" and "Last_GnssDiffAlt" to compute GNSS altitude Last_GnssDiffAlt+GnssDiffFromBaroAlt=GNSS ALT (restrict update to resonable length of time: 
+            # Last_GnssDiff    time.Time // Time of last GnssDiffFromBaroAlt update (stratuxClock).)
+            # cot must have altitude in meters HAE (WGS84 ellipsoid)
+            #
+            # MUST do math:  'Last_GnssDiffAlt' + 'GnssDiffFromBaroAlt' = alt_hae
+            #                      ensure the Last_GnssDiff "time" is short from the overal message time to keep it relevant....some lat/long updates may not change alt_hae and sometimes just the alt_hae may upate
+            # ADS-B altitude transformations to becom CoT:   GNSS/geometric altitude MSL (geoid) --> feet HAE --> meters HAE
+        if alt: # if alt_hae
+            point.hae = alt * 0.3048   # converts feet to meters   ---->  point.hae = alt_hae * 0.3048
         else:
             point.hae = "9999999.0"
 
     uid = pycot.UID()
-    uid.Droid = name
+    uid.Droid = name  # this is not necessary for 2525 or iconsets
 
     contact = pycot.Contact()
     contact.callsign = callsign
-    # Not supported by FTS 1.1?
-    # if flight:
-    #    contact.hostname = f'https://flightaware.com/live/flight/{flight}'
+    # Not supported by FTS 1.1?   # how does this work?
+    ## if flight: 
+    ##   contact.hostname = f'https://globe.adsbexchange.com/?icao={icao_hex}'  # TODO:  Add "~" to leading position of icao_hex in the URL to get a match at the moment: 
+                                                                                #      example:   https://globe.adsbexchange.com/?icao=~2f8b82
 
     track = pycot.Track()
-    track.course = msg.get('Track', '9999999.0')
+    track.course = msg.get('Track', '9999999')
 
     # gs: ground speed in knots
-    gs = int(msg.get('Speed', 0))
+    gs = int(msg.get('Speed', 0)) 
     if gs:
-        track.speed = gs * 0.514444
+        track.speed = gs * 0.514444    # converts knots to meters per second m/s
     else:
-        track.speed = '9999999.0'
+        track.speed = '9999999.0'      
 
     remarks = pycot.Remarks()
-    _remarks = f"Squawk: {msg.get('Squawk')} Category: {emitter_category}"
+    _remarks = f"Squawk: {msg.get('Squawk')} Registry(calc): {calc_registry} Category: {emitter_category}  "   
+        ## add table of GDL90 Emiiter Catagories that StratuX provides to the associated DO-260B that someone would see in adsbexchange
+        ## Change Category to ---->    Category: {DO260B_emitter_categroy}
+        ## ADD:    ADSB Type: {TargetTypeValue}   from table definitions with plane text
     if flight:
         _remarks = f"{icao_hex}({flight}) {_remarks}"
     else:
@@ -194,6 +211,8 @@ def stratux_to_cot(msg: dict, stale: int = None, # NOQA pylint: disable=too-many
     detail.contact = contact
     detail.track = track
     detail.remarks = remarks
+  # detail.geopointsrc = geopointsource
+  # detail.altsrc = altsrc
 
     event = pycot.Event()
     event.version = "2.0"
@@ -201,7 +220,7 @@ def stratux_to_cot(msg: dict, stale: int = None, # NOQA pylint: disable=too-many
     event.uid = name
     event.time = time
     event.start = time
-    event.stale = time + datetime.timedelta(seconds=stale)
+    event.stale = time + datetime.timedelta(seconds=stale)  # force default to 20 seconds for Stratuxcot
     event.how = "m-g"
     event.point = point
     event.detail = detail
@@ -235,12 +254,12 @@ def hello_event():
 
     event = pycot.Event()
     event.version = '2.0'
-    event.event_type = 'a-u-G'
+    event.event_type = 'y-a-u-G'  # can make a non-visible (not on map) by adding "y-" to leading digits of cot type
     event.uid = name
     event.time = time
     event.start = time
-    event.stale = time + datetime.timedelta(hours=1)
-    event.how = 'h-g-i-g-o'
+    event.stale = time + datetime.timedelta(hours=1) # change default to 5 minutes (300 seconds)
+    event.how = 'h-g-i-g-o'   # option to use GPS function if installed:   how=m-g-d  (GPS+differential  usually SBAS (WAAS, EGNOS, MSAS)
     event.point = point
     event.detail = detail
 
